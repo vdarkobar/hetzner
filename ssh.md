@@ -111,6 +111,7 @@ The public key is safe to share:
 ```text
 ~/.ssh/id_ed25519.pub
 ```
+<br>
 
 # Copy Files Over SSH Using a Private Key
 
