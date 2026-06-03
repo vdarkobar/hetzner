@@ -17,7 +17,7 @@ chmod 700 ~/.ssh
 ## 3. Generate a new Ed25519 SSH key
 
 ```bash
-ssh-keygen -t ed25519 -a 100 -C "$USER@$(hostname)-$(date +%Y-%m-%d)" -f ~/.ssh/id_ed25519
+ssh-keygen -t ed25519 -a 200 -C "$USER@$(hostname)-$(date +%Y-%m-%d)" -f ~/.ssh/id_ed25519
 ```
 
 When prompted, enter a strong passphrase.
