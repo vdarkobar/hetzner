@@ -70,7 +70,7 @@ The sysctl baseline must sit above `50` because Debian ships its defaults in
 
 1. Edit the values in the `EDIT THESE` block at the top of `cloud-init.yaml`: `hostname`, `fqdn` (delete the line entirely if no FQDN is planned), the admin `name`, and the SSH public key line. Everything below the `DO NOT EDIT BELOW` divider is the baseline and normally needs no changes.
 2. Validate locally: `cloud-init schema --config-file cloud-init.yaml`.
-3. Create the server in the Hetzner Console with an SSH key and a Cloud Firewall attached, and paste `cloud-init.yaml` into the Cloud Config field.
+3. Create the server in the Hetzner Console with an SSH key and a Cloud Firewall attached, and paste contents of `cloud-init.yaml` into the Cloud Config field.
 4. After first boot, SSH in and run phase 2:
 
    ```bash
