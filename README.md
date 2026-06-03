@@ -1,4 +1,10 @@
-# Debian 13 (Trixie) Hardening for host on Hetzner Cloud (not service hardening)
+# Debian 13 (Trixie) Host Hardening for Hetzner Cloud
+
+> **Scope:** this hardens the **host** (the operating system and its baseline) —
+> not the applications you later run on it. A hardened host running a vulnerable
+> service is still a vulnerable server. Treat this as the foundation you build
+> service-level security (TLS, web stack, WAF, app auth, backups, log shipping)
+> on top of, not as a substitute for it.
 
 Two-phase bootstrap and hardening for a public Debian 13 VM on Hetzner Cloud.
 Phase 1 (`cloud-init.yaml`) sets the baseline declaratively on first boot;
@@ -14,7 +20,7 @@ outer layer" assumption are Hetzner-specific.
 - Sets hostname, FQDN, timezone (`Europe/Berlin`), and locale (`en_US.UTF-8`)
 - Disables SSH password authentication globally via `ssh_pwauth: false`
 - Manages only the hostname/FQDN line in `/etc/hosts` (`manage_etc_hosts: localhost`)
-- Creates the admin user with `sudo` group, bash shell, locked password, and `NOPASSWD:ALL` sudo
+- Creates the admin user with `sudo` group, bash shell, locked password, and `NOPASSWD:ALL` sudo (the bootstrap default — phase 2 switches this to password-gated)
 - Installs the SSH public key for the admin user
 - Runs `apt update`, `apt upgrade`, and reboots if the kernel/initramfs requires it
 - Installs baseline packages: `ca-certificates`, `unattended-upgrades`, `apt-listchanges`, `needrestart`, `curl`, `gnupg`, `git`, `rsync`, `less`, `htop`, `jq`
@@ -38,6 +44,7 @@ outer layer" assumption are Hetzner-specific.
 - Verifies the SSH baseline drop-in exists and that `sshd -T` reports every expected directive at its exact expected value
 - Verifies `/var/log/journal` exists; if missing, re-creates it and flushes
 - Verifies the sysctl baseline file exists and that every key (including both `all.*` and `default.*`) matches its expected value — aborts on any drift
+- Switches the admin user to **password-gated sudo by default** (`SUDO_REQUIRE_PASSWORD=1`): prompts to set the account password (used for sudo only — SSH login stays key-only), then removes cloud-init's `NOPASSWD` grant so the user falls back to Debian's stock password-required `%sudo` rule. Sets the password *before* removing `NOPASSWD` and verifies the `sudo`-group + `%sudo`-rule fallback exists first, to avoid lockout. Requires an interactive terminal; set `SUDO_REQUIRE_PASSWORD=0` to keep passwordless sudo
 - Optionally writes `/etc/ssh/sshd_config.d/50-role-<role>.conf` with `AllowUsers`, `DisableForwarding yes`, and narrow `PubkeyAcceptedAlgorithms` (Ed25519 + FIDO2 only), validates it, and reloads SSH — gated by `ROLE` + `APPLY_ROLE_SSH_TIGHTENING`
 - Optionally creates `/etc/sysctl.d/95-role-<role>.conf` for role-specific kernel tweaks — gated by `ROLE` + `APPLY_ROLE_SYSCTL`
 - Detaches UFW from sysctl management (`IPT_SYSCTL=""`) so the firewall stops overwriting the baseline kernel knobs
@@ -61,7 +68,7 @@ The sysctl baseline must sit above `50` because Debian ships its defaults in
 
 ## Usage
 
-1. Replace the four placeholders in `cloud-init.yaml`: `REPLACE-HOSTNAME`, `REPLACE-FQDN`, `REPLACE-ADMIN`, `REPLACE-SSH-PUBLIC-KEY` (delete the `fqdn:` line entirely if no FQDN is planned).
+1. Edit the values in the `EDIT THESE` block at the top of `cloud-init.yaml`: `hostname`, `fqdn` (delete the line entirely if no FQDN is planned), the admin `name`, and the SSH public key line. Everything below the `DO NOT EDIT BELOW` divider is the baseline and normally needs no changes.
 2. Validate locally: `cloud-init schema --config-file cloud-init.yaml`.
 3. Create the server in the Hetzner Console with an SSH key and a Cloud Firewall attached, and paste `cloud-init.yaml` into the Cloud Config field.
 4. After first boot, SSH in and run phase 2:
@@ -71,4 +78,4 @@ The sysctl baseline must sit above `50` because Debian ships its defaults in
    sudo /usr/local/sbin/phase2-hardening.sh
    ```
 
-   Edit the config block at the top of the script first to set `ROLE`, `ADMIN_SSH_ALLOW_CIDRS`, `UFW_ALLOW_HTTP/HTTPS`, `ENABLE_FAIL2BAN`, and the role-apply flags.
+   Edit the config block at the top of the script first to set `ROLE`, `ADMIN_SSH_ALLOW_CIDRS`, `UFW_ALLOW_HTTP/HTTPS`, `ENABLE_FAIL2BAN`, `SUDO_REQUIRE_PASSWORD` (on by default), and the role-apply flags. Run it from an interactive session, since password-gated sudo prompts for a password. After it runs, verify in a second session with `sudo -k; sudo true` before logging out.
