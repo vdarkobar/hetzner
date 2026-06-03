@@ -51,6 +51,8 @@ ENABLE_FAIL2BAN="${ENABLE_FAIL2BAN:-0}"      # key-only SSH + PerSourcePenalties
 APPLY_ROLE_SSH_TIGHTENING="${APPLY_ROLE_SSH_TIGHTENING:-0}"
 APPLY_ROLE_SYSCTL="${APPLY_ROLE_SYSCTL:-0}"
 
+SUDO_REQUIRE_PASSWORD="${SUDO_REQUIRE_PASSWORD:-1}"   # 1 → set a sudo password, remove NOPASSWD (default on)
+
 STATE_DIR="/var/lib/phase2-hardening"
 
 # ── ERR trap ─────────────────────────────────────────────────────────────────
@@ -195,6 +197,72 @@ kernel.unprivileged_bpf_disabled = 1
 SYSCTL_EOF
 echo "[+] sysctl baseline values verified."
 
+# ── Sudo password policy (default ON) ────────────────────────────────────────
+# cloud-init grants the admin user passwordless sudo via
+# /etc/sudoers.d/90-cloud-init-users (NOPASSWD:ALL) and ships a locked password,
+# so the box is usable on first boot. SUDO_REQUIRE_PASSWORD=1 (the default)
+# switches to password-gated sudo on the first phase-2 run:
+#   • prompts you to set the account password (used for sudo ONLY; login stays
+#     key-only because PasswordAuthentication is off) — REQUIRES a terminal
+#   • removes cloud-init's NOPASSWD grant
+#   • the user keeps sudo via Debian's stock '%sudo ALL=(ALL:ALL) ALL' rule,
+#     which requires a password — no custom sudoers file is created
+# Set SUDO_REQUIRE_PASSWORD=0 to keep passwordless sudo.
+# Durable + idempotent: after the switch, re-runs neither re-prompt nor re-add NOPASSWD.
+if [[ "$SUDO_REQUIRE_PASSWORD" -eq 1 ]]; then
+  echo "[*] Switching ${ADMIN_USER} to password-gated sudo..."
+
+  # Preconditions — the fallback path must exist BEFORE we remove NOPASSWD,
+  # or root escalation is lost entirely.
+  if ! id -nG "$ADMIN_USER" | grep -qw sudo; then
+    echo "[-] ${ADMIN_USER} is not in the 'sudo' group — aborting to avoid lockout." >&2
+    exit 1
+  fi
+  if ! grep -qE '^[[:space:]]*%sudo[[:space:]]+ALL=\(ALL:ALL\)[[:space:]]+ALL' /etc/sudoers; then
+    echo "[-] Stock '%sudo' rule not found in /etc/sudoers — aborting to avoid lockout." >&2
+    exit 1
+  fi
+
+  # 1. Ensure a usable password exists BEFORE removing NOPASSWD.
+  pw_status="$(passwd -S "$ADMIN_USER" 2>/dev/null | awk '{print $2}')"
+  if [[ "$pw_status" != "P" ]]; then
+    if [[ ! -t 0 ]]; then
+      echo "[-] SUDO_REQUIRE_PASSWORD=1 needs an interactive terminal to set the password." >&2
+      echo "    Run phase 2 from an interactive SSH session, or pass" >&2
+      echo "    SUDO_REQUIRE_PASSWORD=0 to skip this step." >&2
+      exit 1
+    fi
+    echo "[*] Set a sudo password for ${ADMIN_USER} (not used for SSH login):"
+    if ! passwd "$ADMIN_USER"; then
+      echo "[-] passwd failed — NOPASSWD left in place." >&2
+      exit 1
+    fi
+    pw_status="$(passwd -S "$ADMIN_USER" 2>/dev/null | awk '{print $2}')"
+    if [[ "$pw_status" != "P" ]]; then
+      echo "[-] Password not usable (status=${pw_status:-unknown}) — NOPASSWD left in place." >&2
+      exit 1
+    fi
+  else
+    echo "[+] ${ADMIN_USER} already has a usable password."
+  fi
+
+  # 2. Strip cloud-init's NOPASSWD grant for this user; the %sudo rule (password)
+  #    then applies. Drop the file if nothing but comments/blank lines remain.
+  if [[ -f /etc/sudoers.d/90-cloud-init-users ]]; then
+    sed -i "\|^${ADMIN_USER}[[:space:]].*NOPASSWD|d" /etc/sudoers.d/90-cloud-init-users
+    if ! grep -qvE '^\s*(#|$)' /etc/sudoers.d/90-cloud-init-users; then
+      rm -f /etc/sudoers.d/90-cloud-init-users
+    fi
+    echo "[+] NOPASSWD grant removed; ${ADMIN_USER} now uses password-gated sudo."
+  else
+    echo "[+] No NOPASSWD grant present; ${ADMIN_USER} already password-gated."
+  fi
+
+  # 3. Whole-config sanity check.
+  visudo -c >/dev/null
+  echo "[!] Before logging out, verify in a SEPARATE session:  sudo -k; sudo true"
+fi
+
 # ── Role-specific SSH drop-in (optional) ─────────────────────────────────────
 
 if [[ -n "$ROLE" && "$APPLY_ROLE_SSH_TIGHTENING" -eq 1 ]]; then
@@ -323,9 +391,16 @@ unattended-upgrade --dry-run -d 2>&1 | tail -n 3 | sed 's/^/    /' || true
 
 date -Iseconds > "$STATE_DIR/last-run"
 
+if grep -rqs "^${ADMIN_USER}[[:space:]].*NOPASSWD" /etc/sudoers.d/ 2>/dev/null; then
+  sudo_mode="NOPASSWD (cloud-init default)"
+else
+  sudo_mode="password-gated"
+fi
+
 echo
 echo "── phase2-hardening summary ─────────────────────────────────────────────"
 echo "  admin user   : ${ADMIN_USER}"
+echo "  sudo         : ${sudo_mode}"
 echo "  role         : ${ROLE:-<none>}"
 echo "  role SSH     : $([[ -n "$ROLE" && $APPLY_ROLE_SSH_TIGHTENING -eq 1 ]] && echo applied || echo skipped)"
 echo "  role sysctl  : $([[ -n "$ROLE" && $APPLY_ROLE_SYSCTL -eq 1 ]] && echo applied || echo skipped)"
