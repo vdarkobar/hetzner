@@ -1,15 +1,3 @@
-# Hetzner Cloud  
-
-bootstrap and harden a public Debian 13 VM on Hetzner Cloud
-
-<br>
-  
-Paste the contents of `cloud-init.yaml` into the **Cloud config** section during server creation.  
-
-phase2-hardening.sh
-  
-<br>
-
 # Debian 13 (Trixie) Hardening for Hetzner Cloud
 
 Two-phase bootstrap and hardening for a public Debian 13 VM on Hetzner Cloud.
