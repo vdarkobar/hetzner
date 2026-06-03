@@ -9,7 +9,7 @@ The design is provider-agnostic for the Debian hardening itself; the delivery
 model (single 32 KiB user-data paste) and the "Hetzner Cloud Firewall is the
 outer layer" assumption are Hetzner-specific.
 
-## `cloud-init.yaml` — runs once on first boot
+### `cloud-init.yaml` — runs once on first boot
 
 - Sets hostname, FQDN, timezone (`Europe/Berlin`), and locale (`en_US.UTF-8`)
 - Disables SSH password authentication globally via `ssh_pwauth: false`
