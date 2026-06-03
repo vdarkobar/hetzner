@@ -1,4 +1,4 @@
-# Debian 13 (Trixie) Hardening for host on Hetzner Cloud
+# Debian 13 (Trixie) Hardening for host on Hetzner Cloud (not service hardening)
 
 Two-phase bootstrap and hardening for a public Debian 13 VM on Hetzner Cloud.
 Phase 1 (`cloud-init.yaml`) sets the baseline declaratively on first boot;
