@@ -30,7 +30,7 @@ outer layer" assumption are Hetzner-specific.
 - Enables and starts `unattended-upgrades.service`
 - Prints a `final_message` telling you to SSH in as the admin user and run phase 2 manually
 
-## `phase2-hardening.sh` — runs manually after SSH login, idempotent (re-runnable)
+### `phase2-hardening.sh` — runs manually after SSH login, idempotent (re-runnable)
 
 - Refuses to run unless invoked via `sudo` as the admin user (not as root directly)
 - Checks required commands are present: `cloud-init`, `sshd`, `sysctl`, `journalctl`, `systemctl`, `apt-get`, `awk`
@@ -47,7 +47,7 @@ outer layer" assumption are Hetzner-specific.
 - Writes a timestamp to `/var/lib/phase2-hardening/last-run`
 - Prints a summary block with admin user, role state, UFW/Fail2ban state, journald state, and last-run timestamp
 
-## Drop-in numbering
+### Drop-in numbering
 
 The two config directories have **opposite** precedence rules:
 
