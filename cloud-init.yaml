@@ -1,77 +1,46 @@
 #cloud-config
 # ─────────────────────────────────────────────────────────────────────────────
-#  Hetzner Cloud — Debian 13 (trixie) — single-paste cloud-init
+#  Hetzner Cloud — Debian 13 (trixie) — phase 1 (first boot). See README.md.
+#  Validate before pasting:  cloud-init schema --config-file cloud-init.yaml
 # ─────────────────────────────────────────────────────────────────────────────
-#  Phase 1 (this file, runs once on first boot):
-#    • creates admin user
-#    • writes SSH baseline, sysctl baseline, journald persistence, UU policy
-#    • drops /usr/local/sbin/phase2-hardening.sh onto the VM (does NOT run it)
-#    • patches packages with reboot-if-required
-#
-#  Phase 2 (manual, after SSH as admin):
-#    sudo /usr/local/sbin/phase2-hardening.sh
-#
-#  Drop-in numbering — note the two directories have opposite precedence:
-#    sshd_config.d   first-match-wins  → lower number = higher priority
-#                    01-local  10-baseline  50-role-<role>
-#    sysctl.d        last-write-wins   → higher number = higher priority
-#                    (distro sits at 50-*; baseline must come AFTER it)
-#                    90-baseline  95-role-<role>  99-local
-#
-#  Deliberately NOT here:
-#    • dhclient.conf / resolver edits / /etc/hosts rewrites
-#    • UFW, Fail2ban, role-specific tightening (all → phase 2)
-#    • AuthenticationMethods / DisableForwarding (role-specific → phase 2)
-#    • Long-lived secrets (user-data is readable from metadata)
-#
-#  Placeholders — replace before pasting into Hetzner Cloud Console:
-#    REPLACE-HOSTNAME   REPLACE-FQDN   REPLACE-ADMIN   REPLACE-SSH-PUBLIC-KEY
-#
-#  Validate locally:
-#    cloud-init schema --config-file cloud-init.yaml
-# ─────────────────────────────────────────────────────────────────────────────
+
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║  EDIT THESE — the only values you need to change                          ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
 
 hostname: REPLACE-HOSTNAME
-# If no FQDN is planned, DELETE the next line entirely — do not leave it blank.
-# YAML null / empty string are not the same as "absent"; only removing the key
-# makes cloud-init fall back to deriving the FQDN from 'hostname:' cleanly.
+
+# No FQDN? Delete the whole next line — do NOT leave it blank (blank != absent).
 fqdn: REPLACE-FQDN
 
-# manage_etc_hosts: localhost
-#   cloud-init maintains only the hostname/FQDN entry in /etc/hosts (typically
-#   pointing to 127.0.1.1 on Debian); the rest of the file is left alone.
-#   Consequence: the VM resolves its own FQDN to loopback locally. That is
-#   fine for most services, but note that anything which sanity-checks its
-#   own public IP via gethostbyname(FQDN) will see 127.0.1.1.
-#   Switch to 'true' only if you want cloud-init to own the whole hosts file.
+users:
+  - name: REPLACE-ADMIN                          # your admin username
+    ssh_authorized_keys:
+      - REPLACE-SSH-PUBLIC-KEY                    # full key line: ssh-ed25519 AAAA... you@host
+      # - sk-ssh-ed25519@openssh.com AAAA... you@backup   # optional 2nd/backup key
+    # ---- access policy: leave as-is unless you know why -----------------------
+    groups: [sudo]
+    shell: /bin/bash
+    sudo: ["ALL=(ALL) NOPASSWD:ALL"]             # phase 2 can switch this to password-gated
+    lock_passwd: true
+
+# ╔═══════════════════════════════════════════════════════════════════════════╗
+# ║  DO NOT EDIT BELOW — system baseline                                      ║
+# ╚═══════════════════════════════════════════════════════════════════════════╝
+
+# Maintains only the hostname/FQDN line in /etc/hosts (rest untouched). The VM's
+# own FQDN resolves to 127.0.1.1 locally — fine unless a service needs its own
+# public IP via gethostbyname(FQDN). Set 'true' to let cloud-init own the file.
 manage_etc_hosts: localhost
 preserve_hostname: false
+
+# Belt-and-suspenders: also writes PasswordAuthentication no to main sshd_config,
+# so the baseline drop-in isn't the only thing disabling password login.
+ssh_pwauth: false
 
 timezone: Europe/Berlin
 locale: en_US.UTF-8
 
-# ── SSH password authentication (declarative belt-and-suspenders) ────────────
-# cloud-init writes 'PasswordAuthentication no' into the main sshd_config.
-# The 10-baseline.conf drop-in below sets the same thing. If the drop-in is
-# ever edited and the line is removed, the main config still holds.
-ssh_pwauth: false
-
-# ── Admin user ───────────────────────────────────────────────────────────────
-users:
-  - name: REPLACE-ADMIN
-    groups: [sudo]
-    shell: /bin/bash
-    sudo:
-      - "ALL=(ALL) NOPASSWD:ALL"
-    lock_passwd: true
-    ssh_authorized_keys:
-      # Paste the FULL public key line, e.g.:
-      #   ssh-ed25519 AAAA... darko@primary
-      # Add more lines for backup keys (e.g. second YubiKey):
-      #   - sk-ssh-ed25519@openssh.com AAAA... darko@backup
-      - REPLACE-SSH-PUBLIC-KEY
-
-# ── Packages ─────────────────────────────────────────────────────────────────
 package_update: true
 package_upgrade: true
 package_reboot_if_required: true
@@ -242,7 +211,7 @@ write_files:
       APPLY_ROLE_SSH_TIGHTENING="${APPLY_ROLE_SSH_TIGHTENING:-0}"
       APPLY_ROLE_SYSCTL="${APPLY_ROLE_SYSCTL:-0}"
 
-      SUDO_REQUIRE_PASSWORD="${SUDO_REQUIRE_PASSWORD:-0}"   # 1 → set a sudo password, remove NOPASSWD
+      SUDO_REQUIRE_PASSWORD="${SUDO_REQUIRE_PASSWORD:-1}"   # 1 → set a sudo password, remove NOPASSWD (default on)
 
       STATE_DIR="/var/lib/phase2-hardening"
 
@@ -388,17 +357,18 @@ write_files:
       SYSCTL_EOF
       echo "[+] sysctl baseline values verified."
 
-      # ── Sudo password policy (optional, one-time switch) ─────────────────────────
+      # ── Sudo password policy (default ON) ────────────────────────────────────────
       # cloud-init grants the admin user passwordless sudo via
       # /etc/sudoers.d/90-cloud-init-users (NOPASSWD:ALL) and ships a locked password,
-      # so the box is usable on first boot. SUDO_REQUIRE_PASSWORD=1 switches to
-      # password-gated sudo:
+      # so the box is usable on first boot. SUDO_REQUIRE_PASSWORD=1 (the default)
+      # switches to password-gated sudo on the first phase-2 run:
       #   • prompts you to set the account password (used for sudo ONLY; login stays
-      #     key-only because PasswordAuthentication is off)
+      #     key-only because PasswordAuthentication is off) — REQUIRES a terminal
       #   • removes cloud-init's NOPASSWD grant
       #   • the user keeps sudo via Debian's stock '%sudo ALL=(ALL:ALL) ALL' rule,
       #     which requires a password — no custom sudoers file is created
-      # Durable: once switched, normal (un-flagged) re-runs never re-add NOPASSWD.
+      # Set SUDO_REQUIRE_PASSWORD=0 to keep passwordless sudo.
+      # Durable + idempotent: after the switch, re-runs neither re-prompt nor re-add NOPASSWD.
       if [[ "$SUDO_REQUIRE_PASSWORD" -eq 1 ]]; then
         echo "[*] Switching ${ADMIN_USER} to password-gated sudo..."
 
@@ -416,6 +386,12 @@ write_files:
         # 1. Ensure a usable password exists BEFORE removing NOPASSWD.
         pw_status="$(passwd -S "$ADMIN_USER" 2>/dev/null | awk '{print $2}')"
         if [[ "$pw_status" != "P" ]]; then
+          if [[ ! -t 0 ]]; then
+            echo "[-] SUDO_REQUIRE_PASSWORD=1 needs an interactive terminal to set the password." >&2
+            echo "    Run phase 2 from an interactive SSH session, or pass" >&2
+            echo "    SUDO_REQUIRE_PASSWORD=0 to skip this step." >&2
+            exit 1
+          fi
           echo "[*] Set a sudo password for ${ADMIN_USER} (not used for SSH login):"
           if ! passwd "$ADMIN_USER"; then
             echo "[-] passwd failed — NOPASSWD left in place." >&2
@@ -608,10 +584,11 @@ runcmd:
 final_message: |
   Phase 1 baseline complete in $UPTIME seconds.
 
-  Next:
+  Next (run from an interactive session — phase 2 will prompt you to set a
+  sudo password by default):
     ssh REPLACE-ADMIN@<server-ip>
     sudo /usr/local/sbin/phase2-hardening.sh
 
   Edit the top config block of phase2-hardening.sh first if you want:
   ROLE, ADMIN_SSH_ALLOW_CIDRS, UFW_ALLOW_HTTP/HTTPS, ENABLE_FAIL2BAN,
-  APPLY_ROLE_SSH_TIGHTENING, APPLY_ROLE_SYSCTL.
+  APPLY_ROLE_SSH_TIGHTENING, APPLY_ROLE_SYSCTL, SUDO_REQUIRE_PASSWORD.
