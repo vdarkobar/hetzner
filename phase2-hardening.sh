@@ -1,0 +1,336 @@
+#!/usr/bin/env bash
+#
+# ─────────────────────────────────────────────────────────────────────────────
+#  phase2-hardening.sh
+#  Hetzner Cloud — Debian 13 (trixie) — Phase 2
+# ─────────────────────────────────────────────────────────────────────────────
+#  Runs after cloud-init has applied the baseline. Idempotent: safe to re-run
+#  after policy changes. Does not touch /etc/ssh/sshd_config.d/10-baseline.conf
+#  or /etc/sysctl.d/90-baseline.conf — those are phase-1 territory.
+#
+#  Execution:
+#      sudo /usr/local/sbin/phase2-hardening.sh
+#
+#  Naming on disk — note the two directories have opposite precedence rules:
+#
+#    sshd_config.d   (FIRST-match-wins → lower number = higher priority)
+#        01-local.conf            — manual overrides (highest priority)
+#        10-baseline.conf         — written by cloud-init
+#        50-role-<role>.conf      — written by this script
+#
+#    sysctl.d        (LAST-write-wins → higher number = higher priority)
+#                                   (distro defaults sit at 50-default.conf,
+#                                    so baseline must come AFTER them)
+#        90-baseline.conf         — written by cloud-init
+#        95-role-<role>.conf      — written by this script
+#        99-local.conf            — manual overrides (highest priority)
+# ─────────────────────────────────────────────────────────────────────────────
+
+set -Eeo pipefail
+
+# ── Config ───────────────────────────────────────────────────────────────────
+
+ROLE="${ROLE:-}"                             # e.g. "webapp"; empty = no role file
+ADMIN_USER="${ADMIN_USER:-${SUDO_USER:-}}"   # inherit from sudo invocation
+
+# Source CIDRs allowed to hit in-guest UFW on port 22. Bash array, dual-stack.
+# Empty array = UFW leaves 22/tcp open (Hetzner Cloud Firewall handles it).
+# Example:
+#   ADMIN_SSH_ALLOW_CIDRS=(
+#     "203.0.113.10/32"
+#     "2001:db8:abcd::/64"
+#   )
+ADMIN_SSH_ALLOW_CIDRS=()
+
+ENABLE_UFW="${ENABLE_UFW:-1}"
+UFW_ALLOW_HTTP="${UFW_ALLOW_HTTP:-0}"
+UFW_ALLOW_HTTPS="${UFW_ALLOW_HTTPS:-0}"
+
+ENABLE_FAIL2BAN="${ENABLE_FAIL2BAN:-0}"      # key-only SSH + PerSourcePenalties → off
+
+APPLY_ROLE_SSH_TIGHTENING="${APPLY_ROLE_SSH_TIGHTENING:-0}"
+APPLY_ROLE_SYSCTL="${APPLY_ROLE_SYSCTL:-0}"
+
+STATE_DIR="/var/lib/phase2-hardening"
+
+# ── ERR trap ─────────────────────────────────────────────────────────────────
+
+trap 'rc=$?; printf "\n[!] phase2-hardening failed (rc=%s) at line %s: %s\n" "$rc" "$LINENO" "$BASH_COMMAND" >&2; exit "$rc"' ERR
+
+# ── Preflight: root + commands ───────────────────────────────────────────────
+
+if [[ $EUID -ne 0 ]]; then
+  echo "[-] Must be run as root (use sudo)." >&2
+  exit 1
+fi
+
+for cmd in cloud-init sshd sysctl journalctl systemctl apt-get awk; do
+  command -v "$cmd" >/dev/null 2>&1 || { echo "[-] Required command missing: $cmd" >&2; exit 1; }
+done
+
+if [[ -z "$ADMIN_USER" || "$ADMIN_USER" == "root" ]]; then
+  echo "[!] ADMIN_USER is empty or root. Re-run via 'sudo' as the admin user," >&2
+  echo "    or set ADMIN_USER explicitly (env var or top of script)."          >&2
+  exit 1
+fi
+
+if ! id -u "$ADMIN_USER" >/dev/null 2>&1; then
+  echo "[-] Admin user '$ADMIN_USER' does not exist on this host." >&2
+  exit 1
+fi
+
+mkdir -p "$STATE_DIR"
+
+# ── Verify cloud-init completed successfully ─────────────────────────────────
+
+echo "[*] Checking cloud-init status..."
+if command -v jq >/dev/null 2>&1 && ci_json="$(cloud-init status --format=json 2>/dev/null)"; then
+  ci_status="$(jq -r '.status' <<<"$ci_json")"
+else
+  ci_status="$(cloud-init status 2>/dev/null | awk -F': ' '/^status/{print $2}')" || true
+fi
+
+case "$ci_status" in
+  done|disabled)
+    echo "[+] cloud-init status: $ci_status"
+    ;;
+  running)
+    echo "[-] cloud-init still running — wait for completion before phase 2." >&2
+    exit 1
+    ;;
+  error|degraded)
+    echo "[-] cloud-init reports '$ci_status' — inspect:"     >&2
+    echo "    /var/log/cloud-init.log"                        >&2
+    echo "    /var/log/cloud-init-output.log"                 >&2
+    exit 1
+    ;;
+  *)
+    echo "[!] cloud-init status unclear ('$ci_status') — continuing with caution."
+    ;;
+esac
+
+# ── Verify SSH baseline (exact values) ───────────────────────────────────────
+
+echo "[*] Verifying SSH baseline..."
+
+if [[ ! -f /etc/ssh/sshd_config.d/10-baseline.conf ]]; then
+  echo "[-] /etc/ssh/sshd_config.d/10-baseline.conf missing — phase 1 did not complete." >&2
+  exit 1
+fi
+
+sshd -t
+
+eff="$(sshd -T 2>/dev/null)"
+for expected in \
+    "permitrootlogin no" \
+    "passwordauthentication no" \
+    "kbdinteractiveauthentication no" \
+    "pubkeyauthentication yes" \
+    "usepam yes" \
+    "maxauthtries 3" \
+    "maxsessions 4" \
+    "x11forwarding no" \
+    "permituserenvironment no"; do
+  if ! grep -qix -- "$expected" <<<"$eff"; then
+    key="${expected%% *}"
+    echo "[-] SSH effective config mismatch for: $expected"                 >&2
+    echo "    current: $(grep -i "^${key} " <<<"$eff" || echo '(not set)')" >&2
+    exit 1
+  fi
+done
+echo "[+] SSH baseline verified."
+
+# ── Verify persistent journald ───────────────────────────────────────────────
+
+echo "[*] Verifying persistent journald..."
+if [[ ! -d /var/log/journal ]]; then
+  echo "[!] /var/log/journal missing — creating and flushing..."
+  systemd-tmpfiles --create /etc/tmpfiles.d/journal-persistent.conf
+  journalctl --flush
+fi
+[[ -d /var/log/journal ]] && echo "[+] Persistent journald active."
+
+# ── Verify sysctl baseline (exact values) ────────────────────────────────────
+
+echo "[*] Verifying sysctl baseline values..."
+
+if [[ ! -f /etc/sysctl.d/90-baseline.conf ]]; then
+  echo "[-] /etc/sysctl.d/90-baseline.conf missing — phase 1 did not complete." >&2
+  exit 1
+fi
+
+while IFS= read -r line; do
+  [[ -z "$line" || "$line" =~ ^[[:space:]]*# ]] && continue
+  key="${line%%=*}";       key="${key// /}"
+  expected="${line##*=}";  expected="${expected// /}"
+  val="$(sysctl -n "$key" 2>/dev/null || true)"
+  if [[ "$val" != "$expected" ]]; then
+    echo "[-] sysctl mismatch: ${key} = ${val:-<unset>} (expected ${expected})" >&2
+    exit 1
+  fi
+done <<'SYSCTL_EOF'
+net.ipv4.conf.all.rp_filter = 1
+net.ipv4.conf.default.rp_filter = 1
+net.ipv4.conf.all.accept_redirects = 0
+net.ipv4.conf.default.accept_redirects = 0
+net.ipv6.conf.all.accept_redirects = 0
+net.ipv6.conf.default.accept_redirects = 0
+net.ipv4.conf.all.send_redirects = 0
+net.ipv4.conf.default.send_redirects = 0
+net.ipv4.conf.all.accept_source_route = 0
+net.ipv4.conf.default.accept_source_route = 0
+net.ipv6.conf.all.accept_source_route = 0
+net.ipv6.conf.default.accept_source_route = 0
+net.ipv4.icmp_echo_ignore_broadcasts = 1
+net.ipv4.tcp_syncookies = 1
+net.ipv4.conf.all.log_martians = 1
+net.ipv4.conf.default.log_martians = 1
+fs.protected_hardlinks = 1
+fs.protected_symlinks = 1
+fs.protected_fifos = 2
+fs.protected_regular = 2
+kernel.kptr_restrict = 2
+kernel.dmesg_restrict = 1
+kernel.unprivileged_bpf_disabled = 1
+SYSCTL_EOF
+echo "[+] sysctl baseline values verified."
+
+# ── Role-specific SSH drop-in (optional) ─────────────────────────────────────
+
+if [[ -n "$ROLE" && "$APPLY_ROLE_SSH_TIGHTENING" -eq 1 ]]; then
+  role_ssh="/etc/ssh/sshd_config.d/50-role-${ROLE}.conf"
+  echo "[*] Writing role-specific SSH drop-in: $role_ssh"
+
+  # NOTE: PubkeyAcceptedAlgorithms below is deliberately narrow (Ed25519 and
+  # FIDO2 sk-* only). Inventory your admin keys before enabling — any RSA or
+  # ECDSA backup key will be rejected.
+  cat >"$role_ssh" <<EOF
+# Role: ${ROLE} — role-specific SSH tightening.
+# Owned by phase2-hardening.sh. Manual overrides go in 01-local.conf
+# (sshd_config.d is first-match-wins, so manual overrides need a LOWER number).
+
+AllowUsers ${ADMIN_USER}
+DisableForwarding yes
+PubkeyAcceptedAlgorithms ssh-ed25519,sk-ssh-ed25519@openssh.com,sk-ecdsa-sha2-nistp256@openssh.com
+EOF
+  chmod 0644 "$role_ssh"
+
+  if sshd -t; then
+    systemctl reload ssh
+    echo "[+] Role SSH drop-in applied and SSH reloaded."
+  else
+    echo "[-] Role SSH drop-in failed validation — removing $role_ssh" >&2
+    rm -f "$role_ssh"
+    exit 1
+  fi
+fi
+
+# ── Role-specific sysctl drop-in (optional) ──────────────────────────────────
+
+if [[ -n "$ROLE" && "$APPLY_ROLE_SYSCTL" -eq 1 ]]; then
+  role_sysctl="/etc/sysctl.d/95-role-${ROLE}.conf"
+  echo "[*] Writing role-specific sysctl drop-in: $role_sysctl"
+
+  if [[ ! -s "$role_sysctl" ]]; then
+    cat >"$role_sysctl" <<EOF
+# Role: ${ROLE} — role-specific sysctl tweaks.
+# Owned by phase2-hardening.sh. Extend per role; 90-baseline.conf still applies
+# (last-write-wins). Manual overrides go in 99-local.conf.
+EOF
+    chmod 0644 "$role_sysctl"
+  fi
+  sysctl --system >/dev/null
+  echo "[+] Role sysctl drop-in applied."
+fi
+
+# ── UFW (in-guest defense-in-depth; Hetzner FW remains outer layer) ──────────
+
+if [[ "$ENABLE_UFW" -eq 1 ]]; then
+  echo "[*] Configuring UFW..."
+  DEBIAN_FRONTEND=noninteractive apt-get update -qq
+  DEBIAN_FRONTEND=noninteractive apt-get install -y ufw >/dev/null
+
+  # Detach UFW from sysctl management.
+  # UFW ships /etc/ufw/sysctl.conf with several keys that conflict with our
+  # baseline (notably log_martians=0). Default Debian wiring re-applies that
+  # file on every ufw enable/reload, which would clobber /etc/sysctl.d/90-baseline.conf.
+  # Setting IPT_SYSCTL="" tells UFW to leave sysctl alone — packet filtering
+  # is UFW's job, kernel knobs are the baseline's.
+  if grep -q '^IPT_SYSCTL=' /etc/default/ufw; then
+    sed -i 's|^IPT_SYSCTL=.*|IPT_SYSCTL=""|' /etc/default/ufw
+  else
+    echo 'IPT_SYSCTL=""' >> /etc/default/ufw
+  fi
+
+  # Declarative: reset then re-apply from this config block. Re-run = same state.
+  ufw --force reset >/dev/null
+  ufw default deny incoming  >/dev/null
+  ufw default allow outgoing >/dev/null
+
+  if (( ${#ADMIN_SSH_ALLOW_CIDRS[@]} > 0 )); then
+    for cidr in "${ADMIN_SSH_ALLOW_CIDRS[@]}"; do
+      ufw allow from "$cidr" to any port 22 proto tcp comment "admin SSH" >/dev/null
+    done
+  else
+    ufw allow 22/tcp comment "SSH (scoped by Hetzner FW)" >/dev/null
+  fi
+
+  [[ "$UFW_ALLOW_HTTP"  -eq 1 ]] && ufw allow 80/tcp  comment "http"  >/dev/null
+  [[ "$UFW_ALLOW_HTTPS" -eq 1 ]] && ufw allow 443/tcp comment "https" >/dev/null
+
+  ufw logging low >/dev/null
+  ufw --force enable >/dev/null
+  echo "[+] UFW active."
+  ufw status verbose | sed 's/^/    /'
+fi
+
+# ── Fail2ban (optional) ──────────────────────────────────────────────────────
+
+if [[ "$ENABLE_FAIL2BAN" -eq 1 ]]; then
+  echo "[*] Installing Fail2ban..."
+  # python3-systemd is only a Recommends of fail2ban, but the systemd backend
+  # below hard-depends on it — pin it explicitly.
+  DEBIAN_FRONTEND=noninteractive apt-get install -y fail2ban python3-systemd >/dev/null
+  mkdir -p /etc/fail2ban/jail.d
+  chmod 0755 /etc/fail2ban/jail.d
+
+  cat >/etc/fail2ban/jail.d/sshd.local <<'EOF'
+# Local override — upstream .conf files stay untouched.
+[sshd]
+enabled  = true
+mode     = aggressive
+maxretry = 3
+findtime = 10m
+bantime  = 1h
+backend  = systemd
+EOF
+  chmod 0644 /etc/fail2ban/jail.d/sshd.local
+
+  systemctl enable --now fail2ban
+  systemctl restart fail2ban
+  echo "[+] Fail2ban configured (sshd jail, systemd backend)."
+fi
+
+# ── Unattended-upgrades finalization ─────────────────────────────────────────
+
+echo "[*] Finalizing unattended-upgrades policy..."
+systemctl is-enabled unattended-upgrades >/dev/null 2>&1 || systemctl enable --now unattended-upgrades
+
+echo "[*] Dry-run (tail):"
+unattended-upgrade --dry-run -d 2>&1 | tail -n 3 | sed 's/^/    /' || true
+
+# ── Summary ──────────────────────────────────────────────────────────────────
+
+date -Iseconds > "$STATE_DIR/last-run"
+
+echo
+echo "── phase2-hardening summary ─────────────────────────────────────────────"
+echo "  admin user   : ${ADMIN_USER}"
+echo "  role         : ${ROLE:-<none>}"
+echo "  role SSH     : $([[ -n "$ROLE" && $APPLY_ROLE_SSH_TIGHTENING -eq 1 ]] && echo applied || echo skipped)"
+echo "  role sysctl  : $([[ -n "$ROLE" && $APPLY_ROLE_SYSCTL -eq 1 ]] && echo applied || echo skipped)"
+echo "  UFW          : $([[ $ENABLE_UFW -eq 1 ]] && echo on || echo off) ($(( ${#ADMIN_SSH_ALLOW_CIDRS[@]} )) admin CIDR(s))"
+echo "  Fail2ban     : $([[ $ENABLE_FAIL2BAN -eq 1 ]] && echo on || echo off)"
+echo "  journald     : $([[ -d /var/log/journal ]] && echo persistent || echo volatile)"
+echo "  last run     : $(cat "$STATE_DIR/last-run")"
+echo "─────────────────────────────────────────────────────────────────────────"
