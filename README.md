@@ -89,7 +89,7 @@ sudo chmod 0755 /usr/local/sbin/phase3-webserver.sh
 ```
 ```bash
 # edit:
-nano /usr/local/sbin/phase3-webserver.sh
+sudo nano /usr/local/sbin/phase3-webserver.sh
 ```
 ```bash
 # execute:
