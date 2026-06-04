@@ -79,3 +79,19 @@ The sysctl baseline must sit above `50` because Debian ships its defaults in
    ```
 
    Edit the config block at the top of the script first to set `ROLE`, `ADMIN_SSH_ALLOW_CIDRS`, `UFW_ALLOW_HTTP/HTTPS`, `ENABLE_FAIL2BAN`, `SUDO_REQUIRE_PASSWORD` (on by default), and the role-apply flags. Run it from an interactive session, since password-gated sudo prompts for a password. After it runs, verify in a second session with `sudo -k; sudo true` before logging out.
+  
+## Phase 3 — nginx Static Site with Hardened TLS and Auto-Renewing Let's Encrypt  
+
+```bash
+# download:
+sudo wget -O /usr/local/sbin/phase3-webserver.sh https://raw.githubusercontent.com/vdarkobar/hetzner/main/phase3-webserver.sh
+sudo chmod 0755 /usr/local/sbin/phase3-webserver.sh
+```
+```bash
+# edit:
+nano /usr/local/sbin/phase3-webserver.sh
+```
+```bash
+# execute:
+sudo /usr/local/sbin/phase3-webserver.sh
+```
