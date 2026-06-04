@@ -2,8 +2,8 @@
   
   
 > **Scope:** this hardens the **host** (the operating system and its baseline) —
-> not the applications you later run on it.
-> A hardened host running a vulnerable service is still a vulnerable server.
+> not the applications you later run on it.  
+> A hardened host running a vulnerable service is still a vulnerable server.  
 > Treat this as the foundation you build service-level security (TLS, web stack, WAF, app auth, backups, log shipping)
 > on top of, not as a substitute for it.  
   
