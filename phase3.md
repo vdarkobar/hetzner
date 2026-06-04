@@ -1,1 +1,26 @@
+### `phase3-webserver.sh` — runs manually after phases 1–2, idempotent (re-runnable)
 
+- Refuses to run unless invoked as root (via `sudo`); derives the staging-directory owner from `SUDO_USER`
+- Checks required commands are present: `systemctl`, `apt-get`, `awk`, `getent`, `curl`, `rsync`
+- Validates config before any side effect: rejects the placeholder or non-FQDN `PRIMARY_DOMAIN`, rejects `example.com` placeholders and non-FQDNs in `EXTRA_DOMAINS` (space-separated and env-overridable, empty `""` meaning no extra SANs), and rejects a placeholder or malformed `CERTBOT_EMAIL`
+- On a first run, if `SITE_SRC` (default `/home/$SUDO_USER/site`) does not exist, creates it owned by the invoking user — so you can `scp` pages in, since `PermitRootLogin no` makes `/root` unreachable — prints the upload workflow, and exits cleanly *before* installing anything
+- Requires at least one `.html` under `SITE_SRC`; warns if `index.html` is not at the top (so `/` would 404)
+- Confirms the phase-1 SSH baseline exists, and notes whether phase 2 has run (`/var/lib/phase2-hardening/last-run`)
+- Verifies, but does **not** modify, UFW: if UFW is active it confirms `80/tcp` and `443/tcp` are allowed and aborts with remediation if not — phase 2 owns UFW, so this is only a precondition check
+- Runs a soft DNS check that each domain resolves to one of the host's local IPs (warns, does not block — HTTP-01 needs public DNS pointing here)
+- Installs the distribution's `nginx` and `certbot` (no snap, no third-party nginx.org repo — so phase 1's unattended-upgrades keep them patched)
+- Deploys content: `rsync`s `SITE_SRC` into the docroot `/var/www/<primary>/html`, owned `root:root` at `0755`/`0644` (readable, never writable by the `www-data` worker), and creates the shared ACME webroot
+- Splits nginx hardening to avoid Debian's duplicate-directive error: per-request tuning (`server_tokens off`, `client_max_body_size`, timeouts, `keepalive_timeout`) goes in a server-context snippet `/etc/nginx/snippets/hardening.conf`, while only http-context directives that Debian does not already set (`limit_req_zone`, and the optional anonymized-IP `map`/`log_format`) go in `/etc/nginx/conf.d/00-hardening.conf`
+- Writes the TLS snippet `/etc/nginx/snippets/tls-modern.conf` (TLS 1.2 + 1.3, Mozilla "intermediate" ciphers, session cache) with OCSP stapling intentionally omitted, since Let's Encrypt removed OCSP from certificates in 2025
+- Writes the security-headers snippet `/etc/nginx/snippets/security-headers.conf` (`X-Content-Type-Options`, `X-Frame-Options: DENY`, `Referrer-Policy`, `Permissions-Policy`, a self-only `Content-Security-Policy`) and conditional HSTS — enabled by default, with `includeSubDomains` opt-in (off by default) and `preload` off
+- Obtains the certificate via the webroot HTTP-01 method: writes a transient HTTP-only vhost, runs `certbot certonly --webroot` (ECDSA key, `--cert-name` set to the primary domain), and skips issuance entirely if a certificate already exists unless `FORCE_ISSUE=1`, so re-runs cause no HTTPS blip; `STAGING=1` issues against the Let's Encrypt staging CA (untrusted, no rate limits)
+- Writes the hardened vhost: an HTTP block that keeps `/.well-known/acme-challenge/` reachable for renewals and `301`-redirects everything else to HTTPS, and an HTTP/2 HTTPS block serving the site with the TLS, headers, and hardening includes, per-IP `limit_req` applied in `location /` only (static assets exempt), 7-day asset caching, and a dotfile `deny`
+- Enables the site, removes the stock `default` vhost, validates with `nginx -t`, and reloads
+- Installs a renewal deploy hook `/etc/letsencrypt/renewal-hooks/deploy/00-reload-nginx.sh` that runs `nginx -t && systemctl reload nginx` only on an actual renewal, and asserts the twice-daily `certbot.timer` is enabled
+- Optionally adds per-IP rate limiting and a Fail2ban jail — gated by `ENABLE_NGINX_RATELIMIT` and `ENABLE_NGINX_FAIL2BAN_JAIL` (both on by default): writes `/etc/fail2ban/jail.d/nginx.local` (the `nginx-limit-req` jail, which reads `error.log` so it survives access-log IP anonymization and bans `http,https` only), installing and starting Fail2ban as a fallback if absent; if either toggle is off it declaratively removes any jail file a previous run wrote and reloads Fail2ban
+- Runs health checks: `nginx` active, local HTTPS and HTTP `GET /` (skipping certificate verification on `STAGING=1`), Fail2ban jail status, and a `certbot renew --dry-run` to validate the whole renewal path
+- Writes `/root/WEBSERVER-RUNBOOK.md` with paths, page-update steps, and cert/renewal/unban commands — gated by `WRITE_RUNBOOK`
+- Writes a login MOTD drop-in `/etc/update-motd.d/30-webserver` (domain, staging directory and `scp` reminder, the re-run-to-publish workflow, plus staging-to-production recovery commands when `STAGING=1`) — gated by `WRITE_MOTD`, and removed when `WRITE_MOTD=0`
+- Never touches UFW (phase 2's job) and never modifies the phase-1 SSH or sysctl baselines
+- Writes a timestamp to `/var/lib/phase3-webserver/last-run`
+- Prints a summary block with domains, docroot, TLS/HSTS/rate-limit/jail state, certificate type (staging or production) and expiry, renewal-timer state, the HTTPS/HTTP probe results, and the last-run timestamp — including the `certbot delete` and re-run steps when a staging certificate was issued
