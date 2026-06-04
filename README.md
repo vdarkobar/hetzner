@@ -1,15 +1,21 @@
 # Quick Start — Debian 13 on Hetzner Cloud  
   
   
-> **Scope:** this hardens the **host** (the operating system and its baseline) —
-> not the applications you later run on it.  
-> A hardened host running a vulnerable service is still a vulnerable server.  
-> Treat this as the foundation you build service-level security (TLS, web stack, WAF, app auth, backups, log shipping)
-> on top of, not as a substitute for it.  
-  
-The design is provider-agnostic for the Debian hardening itself; the delivery
-model (single 32 KiB user-data paste) and the "Hetzner Cloud Firewall is the
-outer layer" assumption are Hetzner-specific.
+> **Scope:** phases 1–2 harden the **host** (the OS and its baseline); phase 3 adds a
+> hardened **static-site layer** on top — nginx, auto-renewing Let's Encrypt TLS, a
+> modern cipher config, security headers, per-IP rate limiting, and a Fail2ban jail.  
+> Together they're a foundation, not a complete security program.  
+> A hardened host and valid TLS won't save a vulnerable application: phase 3 serves
+> **static content only**, and the moment you put a dynamic app behind it (a backend,
+> a CMS, or server-side form handling) you reintroduce application attack surface —
+> injection, auth, sessions, dependency CVEs — that none of these phases address.  
+> Rate limiting is not a WAF. Backups, monitoring and alerting, log shipping, and
+> application-level auth remain yours to build on top.
+
+The design is provider-agnostic for the Debian hardening and the nginx/TLS layer
+itself; the delivery model — a single cloud-init user-data paste (~32 KiB, carrying the
+phase-2 script inline) — and the two-layer firewall assumption (Hetzner Cloud Firewall
+as the outer layer, UFW as the inner) are Hetzner-specific.
   
 <br>
   
