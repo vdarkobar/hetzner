@@ -52,10 +52,8 @@ packages:
   - needrestart
   - curl
   - gnupg
-  - git
   - rsync
   - less
-  - htop
   - jq
 
 # ── Baseline files ───────────────────────────────────────────────────────────
@@ -144,6 +142,18 @@ write_files:
       # (Storage=auto default on Debian 13).
       d /var/log/journal 2755 root systemd-journal - -
 
+  - path: /etc/systemd/journald.conf.d/10-retention.conf
+    owner: root:root
+    permissions: '0644'
+    content: |
+      # Baseline — written by cloud-init (phase 1).
+      # GDPR: persistent journal (see tmpfiles.d/journal-persistent.conf)
+      # must not retain personal data (client IPs) indefinitely.
+      # Enforced at rotation/vacuum, not as a continuous purge — entries can
+      # briefly outlive the cap until the journal rotates.
+      [Journal]
+      MaxRetentionSec=14day
+
   - path: /etc/apt/apt.conf.d/52unattended-upgrades-local
     owner: root:root
     permissions: '0644'
@@ -203,8 +213,12 @@ write_files:
       ADMIN_SSH_ALLOW_CIDRS=()
 
       ENABLE_UFW="${ENABLE_UFW:-1}"
-      UFW_ALLOW_HTTP="${UFW_ALLOW_HTTP:-0}"
-      UFW_ALLOW_HTTPS="${UFW_ALLOW_HTTPS:-0}"
+      # Web host: 80/443 hardcoded ON (not env-gated). Phase 2 is declarative
+      # (ufw --force reset on every run) — env-default 0 would close the ports
+      # on any re-run, killing the site and the Rust app's ACME HTTP-01 renewals.
+      # Port 80 stays open even though TLS is on 443: HTTP-01 + 80→443 redirect.
+      UFW_ALLOW_HTTP=1
+      UFW_ALLOW_HTTPS=1
 
       ENABLE_FAIL2BAN="${ENABLE_FAIL2BAN:-0}"      # key-only SSH + PerSourcePenalties → off
 
@@ -311,6 +325,13 @@ write_files:
         journalctl --flush
       fi
       [[ -d /var/log/journal ]] && echo "[+] Persistent journald active."
+
+      if [[ ! -f /etc/systemd/journald.conf.d/10-retention.conf ]]; then
+        echo "[-] /etc/systemd/journald.conf.d/10-retention.conf missing — phase 1 did not complete." >&2
+        echo "    (GDPR log-retention cap — see Datenschutzerklärung, log retention)"                 >&2
+        exit 1
+      fi
+      echo "[+] journald retention cap present (MaxRetentionSec=14day)."
 
       # ── Verify sysctl baseline (exact values) ────────────────────────────────────
 
@@ -577,6 +598,7 @@ runcmd:
   - [ sshd, -t ]
   - [ systemd-tmpfiles, --create, /etc/tmpfiles.d/journal-persistent.conf ]
   - [ journalctl, --flush ]
+  - [ systemctl, restart, systemd-journald ]
   - [ sysctl, --system ]
   - [ systemctl, reload, ssh ]
   - [ systemctl, enable, --now, unattended-upgrades.service ]
@@ -590,5 +612,6 @@ final_message: |
     sudo /usr/local/sbin/phase2-hardening.sh
 
   Edit the top config block of phase2-hardening.sh first if you want:
-  ROLE, ADMIN_SSH_ALLOW_CIDRS, UFW_ALLOW_HTTP/HTTPS, ENABLE_FAIL2BAN,
+  ROLE, ADMIN_SSH_ALLOW_CIDRS, ENABLE_FAIL2BAN,
   APPLY_ROLE_SSH_TIGHTENING, APPLY_ROLE_SYSCTL, SUDO_REQUIRE_PASSWORD.
+  (UFW 80/443 are hardcoded ON — web host; do not re-gate them.)
