@@ -52,8 +52,10 @@ packages:
   - needrestart
   - curl
   - gnupg
+  - git
   - rsync
   - less
+  - htop
   - jq
 
 # ── Baseline files ───────────────────────────────────────────────────────────
